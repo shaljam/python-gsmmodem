@@ -2,10 +2,12 @@
 
 """ Low-level serial communications handling """
 
+import asyncio
 import sys, threading, logging
 
 import re
 import serial # pyserial: http://pyserial.sourceforge.net
+import serial_asyncio
 
 from .exceptions import TimeoutException
 from . import compat # For Python 2.6 compatibility
@@ -39,109 +41,147 @@ class SerialComms(object):
         # Reentrant lock for managing concurrent write access to the underlying serial port
         self._txLock = threading.RLock()
         
-        self.notifyCallback = notifyCallbackFunc or self._placeholderCallback        
-        self.fatalErrorCallback = fatalErrorCallbackFunc or self._placeholderCallback
+        # self.notifyCallback = notifyCallbackFunc or self._placeholderCallback
+        # self.fatalErrorCallback = fatalErrorCallbackFunc or self._placeholderCallback
         
         self.com_args = args
         self.com_kwargs = kwargs
-        
-    def connect(self):
-        """ Connects to the device and starts the read thread """                
-        self.serial = serial.Serial(dsrdtr=True, rtscts=True, port=self.port, baudrate=self.baudrate,
-                                    timeout=self.timeout,*self.com_args,**self.com_kwargs)
-        # Start read thread
-        self.alive = True 
-        self.rxThread = threading.Thread(target=self._readLoop)
-        self.rxThread.daemon = True
-        self.rxThread.start()
 
-    def close(self):
-        """ Stops the read thread, waits for it to exit cleanly, then closes the underlying serial port """        
-        self.alive = False
-        self.rxThread.join()
-        self.serial.close()
-
-    def _handleLineRead(self, line, checkForResponseTerm=True):
-        #print 'sc.hlineread:',line
-        if self._responseEvent and not self._responseEvent.is_set():
-            # A response event has been set up (another thread is waiting for this response)
-            self._response.append(line)
-            if not checkForResponseTerm or self.RESPONSE_TERM.match(line):
-                # End of response reached; notify waiting thread
-                #print 'response:', self._response
-                self.log.debug('response: %s', self._response)
-                self._responseEvent.set()
-        else:            
-            # Nothing was waiting for this - treat it as a notification
-            self._notification.append(line)
-            if self.serial.inWaiting() == 0:
-                # No more chars on the way for this notification - notify higher-level callback
-                #print 'notification:', self._notification
-                self.log.debug('notification: %s', self._notification)
-                self.notifyCallback(self._notification)
-                self._notification = []                
+        self.protocol = None
+        self.reply_future = None
 
     def _placeholderCallback(self, *args, **kwargs):
         """ Placeholder callback function (does nothing) """
-        
-    def _readLoop(self):
-        """ Read thread main loop
-        
-        Reads lines from the connected device
-        """
-        try:
-            readTermSeq = bytearray(self.RX_EOL_SEQ)
-            readTermLen = len(readTermSeq)
-            rxBuffer = bytearray()
-            while self.alive:
-                data = self.serial.read(1).decode() #Python 3.x compatibility
-                if data != '': # check for timeout
-                    #print >> sys.stderr, ' RX:', data,'({0})'.format(ord(data))
-                    rxBuffer.append(ord(data))
-                    if rxBuffer[-readTermLen:] == readTermSeq:
-                        # A line (or other logical segment) has been read
-                        line = bytes(rxBuffer[:-readTermLen])
-                        rxBuffer = bytearray()
-                        if len(line) > 0:                          
-                            #print 'calling handler'                      
-                            self._handleLineRead(line)
-                    elif self._expectResponseTermSeq:
-                        if rxBuffer[-len(self._expectResponseTermSeq):] == self._expectResponseTermSeq:
-                            line = bytes(rxBuffer) 
-                            rxBuffer = bytearray()
-                            self._handleLineRead(line, checkForResponseTerm=False)                                                
-            #else:
-                #' <RX timeout>'
-        except serial.SerialException as e:
-            self.alive = False
-            try:
-                self.serial.close()
-            except Exception: #pragma: no cover
-                pass
-            # Notify the fatal error handler
-            self.fatalErrorCallback(e)
-        
-    def write(self, data, waitForResponse=True, timeout=5, expectedResponseTermSeq=None):
+
+    async def connect(self):
+        _, self.protocol = await serial_asyncio.create_serial_connection(
+            asyncio.get_event_loop(),
+            lambda: Output(self),
+            self.port,
+            baudrate=self.baudrate
+        )
+
+        self.alive = True
+        self.connection_future = asyncio.Future()
+        await self.connection_future
+
+    async def close(self):
+        print('closing...')
+        if self.protocol:
+            self.protocol.close()
+        self.protocol = None
+        self.alive = False
+
+    async def write(self, data, waitForResponse=True, timeout=5, expectedResponseTermSeq=None):
         if isinstance(data, str):
             data = data.encode()
-        with self._txLock:            
-            if waitForResponse:
-                if expectedResponseTermSeq:
-                    self._expectResponseTermSeq = bytearray(expectedResponseTermSeq) 
-                self._response = []
-                self._responseEvent = threading.Event()                
-                self.serial.write(data)
-                if self._responseEvent.wait(timeout):
-                    self._responseEvent = None
-                    self._expectResponseTermSeq = False
-                    return self._response
-                else: # Response timed out
-                    self._responseEvent = None
-                    self._expectResponseTermSeq = False
-                    if len(self._response) > 0:
-                        # Add the partial response to the timeout exception
-                        raise TimeoutException(self._response)
-                    else:
-                        raise TimeoutException()
-            else:                
-                self.serial.write(data)
+
+        if waitForResponse:
+            if expectedResponseTermSeq:
+                self._expectResponseTermSeq = bytearray(expectedResponseTermSeq)
+            self._response = []
+            self.reply_future = TimeoutFuture(timeout)
+            self.protocol.send(data)
+            try:
+                return await self.reply_future
+            except asyncio.CancelledError:
+                self.reply_future = None
+                self._expectResponseTermSeq = False
+                if len(self._response) > 0:
+                    # Add the partial response to the timeout exception
+                    raise TimeoutException(self._response)
+                else:
+                    raise TimeoutException()
+        else:
+            self.protocol.send(data)
+
+    async def connected(self):
+        print('hi')
+        # raise NotImplementedError
+
+    async def data(self, data):
+        # print('##### got data {}'.format(data))
+        if self.reply_future and not self.reply_future.done():
+            # A response event has been set up (another thread is waiting for this response)
+            last_line = None
+            seen_expected = False
+            for line in data.split(b'\r\n'):
+                if line:
+                    self._response.append(line)
+                    last_line = line
+                    if self._expectResponseTermSeq == line:
+                        seen_expected = True
+
+            if seen_expected or self.RESPONSE_TERM.match(last_line):
+                # End of response reached; notify waiting thread
+                self.log.debug('response: %s', self._response)
+                if self.reply_future and not self.reply_future.done():
+                    self.reply_future.set_result(self._response)
+        else:
+            # Nothing was waiting for this - treat it as a notification
+            for line in data.split(b'\r\n'):
+                if line:
+                    self._notification.append(line)
+            # if self.serial.inWaiting() == 0:
+            # No more chars on the way for this notification - notify higher-level callback
+            #print 'notification:', self._notification
+            self.log.debug('notification: %s', self._notification)
+            self.notifyCallback(self._notification)
+            self._notification = []
+
+
+class Output(asyncio.Protocol):
+    def __init__(self, connector):
+        super().__init__()
+        self.connector = connector
+        self.transport = None
+        self.connection_lost_future = asyncio.Future()
+
+    def connection_made(self, transport):
+        print('port opened', transport)
+        super().connection_made(transport)
+        self.transport = transport
+        if self.connection_lost_future.done():
+            self.connection_lost_future = asyncio.Future()
+
+        transport.serial.rts = False  # You can manipulate Serial object via transport
+        asyncio.ensure_future(self.connector.connected())
+
+    def data_received(self, data):
+        print('data received', repr(data))
+        asyncio.ensure_future(self.connector.data(data))
+        # if b'\n' in data:
+        #     self.transport.close()
+
+    def connection_lost(self, exc):
+        print('port closed')
+        super().connection_lost(exc)
+        self.transport = None
+        if not self.connection_lost_future.done():
+            self.connection_lost_future.set_result(None)
+
+    def pause_writing(self):
+        print('pause writing')
+        print(self.transport.get_write_buffer_size())
+
+    def resume_writing(self):
+        print(self.transport.get_write_buffer_size())
+        print('resume writing')
+
+    def send(self, data):
+        self.transport.write(data)
+
+    def close(self):
+        if self.transport:
+            self.transport.close()
+            self.transport = None
+
+    async def wait_disconnect(self):
+        await self.connection_lost_future
+
+
+class TimeoutFuture(asyncio.Future):
+    def __init__(self, timeout):
+        super().__init__()
+        if timeout is not None:
+            asyncio.get_event_loop().call_later(timeout, self.cancel)
