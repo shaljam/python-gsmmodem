@@ -41,14 +41,15 @@ class SerialComms(object):
         # Reentrant lock for managing concurrent write access to the underlying serial port
         self._txLock = threading.RLock()
         
-        # self.notifyCallback = notifyCallbackFunc or self._placeholderCallback
-        # self.fatalErrorCallback = fatalErrorCallbackFunc or self._placeholderCallback
+        self.notifyCallback = notifyCallbackFunc or self._placeholderCallback
+        self.fatalErrorCallback = fatalErrorCallbackFunc or self._placeholderCallback
         
         self.com_args = args
         self.com_kwargs = kwargs
 
         self.protocol = None
         self.reply_future = None
+        self.notification_text = b''
 
     def _placeholderCallback(self, *args, **kwargs):
         """ Placeholder callback function (does nothing) """
@@ -80,11 +81,11 @@ class SerialComms(object):
             if expectedResponseTermSeq:
                 self._expectResponseTermSeq = bytearray(expectedResponseTermSeq)
             self._response = []
-            self.reply_future = TimeoutFuture(timeout)
+            self.reply_future = asyncio.Future()
             self.protocol.send(data)
             try:
-                return await self.reply_future
-            except asyncio.CancelledError:
+                return await asyncio.wait_for(self.reply_future, timeout)
+            except asyncio.TimeoutError:
                 self.reply_future = None
                 self._expectResponseTermSeq = False
                 if len(self._response) > 0:
@@ -100,7 +101,7 @@ class SerialComms(object):
         # raise NotImplementedError
 
     async def data(self, data):
-        # print('##### got data {}'.format(data))
+        print('##### got data {}'.format(data))
         if self.reply_future and not self.reply_future.done():
             # A response event has been set up (another thread is waiting for this response)
             last_line = None
@@ -112,22 +113,38 @@ class SerialComms(object):
                     if self._expectResponseTermSeq == line:
                         seen_expected = True
 
-            if seen_expected or self.RESPONSE_TERM.match(last_line):
+            if seen_expected or (last_line and self.RESPONSE_TERM.match(last_line)):
                 # End of response reached; notify waiting thread
                 self.log.debug('response: %s', self._response)
                 if self.reply_future and not self.reply_future.done():
                     self.reply_future.set_result(self._response)
         else:
             # Nothing was waiting for this - treat it as a notification
-            for line in data.split(b'\r\n'):
-                if line:
-                    self._notification.append(line)
+            done = data.endswith(b'\r\n')
+            # for line in data.split(b'\r\n'):
+            #     if line:
+            #         self._notification.append(line)
+            #         last_line = line
+            #
+            # if last_line and self.RESPONSE_TERM.match(last_line):
+            #     # End of response reached; notify waiting thread
+            #     self.log.debug('response: %s', self._response)
+            #     if self.reply_future and not self.reply_future.done():
+            #         self.reply_future.set_result(self._response)
+            self.notification_text += data
             # if self.serial.inWaiting() == 0:
             # No more chars on the way for this notification - notify higher-level callback
             #print 'notification:', self._notification
-            self.log.debug('notification: %s', self._notification)
-            self.notifyCallback(self._notification)
-            self._notification = []
+            if done:
+                for line in self.notification_text.split(b'\r\n'):
+                    if line:
+                        self._notification.append(line)
+
+                self.log.debug('notification: %s', self._notification)
+                self.notifyCallback(self._notification)
+                self._notification = []
+
+                self.notification_text = b''
 
 
 class Output(asyncio.Protocol):

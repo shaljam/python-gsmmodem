@@ -171,8 +171,7 @@ class GsmModem(SerialComms):
         self.activeCalls = {}
         # Dict containing sent SMS messages (for auto-tracking their delivery status)
         self.sentSms = weakref.WeakValueDictionary()
-        self._ussdSessionEvent = None # threading.Event
-        self._ussdResponse = None # gsmmodem.modem.Ussd
+        self._ussdSessionFuture = None # asyncio.Future
         self._smsStatusReportEvent = None # threading.Event
         self._dialEvent = None # threading.Event
         self._dialResponse = None # gsmmodem.modem.Call
@@ -197,6 +196,7 @@ class GsmModem(SerialComms):
         self.pin = None
         self.last_command = None
         # self.response = []
+        self.loop = asyncio.get_event_loop()
 
     def _placeHolderCallback(self, *args):
         """ Does nothing """
@@ -656,8 +656,8 @@ class GsmModem(SerialComms):
     def smsTextMode(self):
         """ :return: True if the modem is set to use text mode for SMS, False if it is set to use PDU mode """
         return self._smsTextMode
-    @smsTextMode.setter
-    async def smsTextMode(self, textMode):
+
+    async def set_smsTextMode(self, textMode):
         """ Set to True for the modem to use text mode for SMS, or False for it to use PDU mode """
         if textMode != self._smsTextMode:
             if self.alive:
@@ -942,11 +942,11 @@ class GsmModem(SerialComms):
             encodedText = encodeGsm7(text)
         except ValueError:
             encodedText = None
-            self.smsTextMode = False
+            await self.set_smsTextMode(False)
 
         # Check message length
         if len(text) > 160:
-            self.smsTextMode = False
+            await self.set_smsTextMode(False)
 
         # Send SMS via AT commands
         if self._smsTextMode:
@@ -957,7 +957,8 @@ class GsmModem(SerialComms):
             # Encode message text and set data coding scheme based on text contents
             if encodedText == None:
                 # Cannot encode text using GSM-7; use UCS2 instead
-                await setattr(self, 'smsEncoding', 'UCS2')
+                await self.set_smsEncoding('UCS2')
+                # await setattr(self, 'smsEncoding', 'UCS2')
                 # self.smsEncoding = 'UCS2'
             else:
                 await self.set_smsEncoding('GSM')
@@ -997,25 +998,31 @@ class GsmModem(SerialComms):
         :return: The USSD response message/session (as a Ussd object)
         :rtype: gsmmodem.modem.Ussd
         """
-        self._ussdSessionEvent = threading.Event()
+        self._ussdSessionFuture = asyncio.Future()
         try:
             cusdResponse = await self.write('AT+CUSD=1,"{0}",15'.format(d(ussdString)), timeout=responseTimeout) # Should respond with "OK"
         except Exception:
-            self._ussdSessionEvent = None # Cancel the thread sync lock
+            self._ussdSessionFuture.set_result(None)
+            self._ussdSessionFuture = None # Cancel the thread sync lock
             raise
+
+        print('csud {}'.format(cusdResponse))
 
         # Some modems issue the +CUSD response before the acknowledgment "OK" - check for that
         if len(cusdResponse) > 1:
             cusdResponseFound = lineStartingWith(b'+CUSD', cusdResponse) != None
             if cusdResponseFound:
-                self._ussdSessionEvent = None # Cancel thread sync lock
+                self._ussdSessionFuture = None
                 return self._parseCusdResponse(cusdResponse)
         # Wait for the +CUSD notification message
-        if self._ussdSessionEvent.wait(responseTimeout):
-            self._ussdSessionEvent = None
-            return self._ussdResponse
-        else: # Response timed out
-            self._ussdSessionEvent = None
+        # await asyncio.sleep(responseTimeout)
+
+        try:
+            ussdResponse = await asyncio.wait_for(self._ussdSessionFuture, timeout=responseTimeout)
+            self._ussdSessionFuture = None
+            return ussdResponse
+        except asyncio.TimeoutError:
+            self._ussdSessionFuture = None
             raise TimeoutException()
 
     async def checkForwarding(self, querytype, responseTimeout=15):
@@ -1537,14 +1544,15 @@ class GsmModem(SerialComms):
             raise ValueError('"delFlag" must be in range [1,4]')
 
     def _handleUssd(self, lines):
+        print('_handleUssd')
         """ Handler for USSD event notification line(s) """
-        if self._ussdSessionEvent:
+        if self._ussdSessionFuture and not self._ussdSessionFuture.done():
             # A sendUssd() call is waiting for this response - parse it
-            self._ussdResponse = self._parseCusdResponse(lines)
-            # Notify waiting thread
-            self._ussdSessionEvent.set()
+            ussdResponse = self._parseCusdResponse(lines)
+            self.loop.call_soon_threadsafe(self._ussdSessionFuture.set_result, ussdResponse)
 
     def _parseCusdResponse(self, lines):
+        print('_parseCusdResponse {}'.format(lines))
         """ Parses one or more +CUSD notification lines (for USSD)
         :return: USSD response object
         :rtype: gsmmodem.modem.Ussd
