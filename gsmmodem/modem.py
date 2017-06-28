@@ -1206,7 +1206,7 @@ class GsmModem(SerialComms):
                 self.deleteMultipleStoredSms()
             else:
                 for msgIndex in delMessages:
-                    self.deleteStoredSms(msgIndex)
+                    await self.deleteStoredSms(msgIndex)
         return messages
 
     def _handleModemNotification(self, lines):
@@ -1219,7 +1219,7 @@ class GsmModem(SerialComms):
         """
         threading.Thread(target=self.__threadedHandleModemNotification, kwargs={'lines': lines}).start()
 
-    def __threadedHandleModemNotification(self, lines):
+    async def __threadedHandleModemNotification(self, lines):
         """ Implementation of _handleModemNotification() to be run in a separate thread
 
         :param lines The lines that were read
@@ -1228,11 +1228,11 @@ class GsmModem(SerialComms):
         for line in lines:
             if b'RING' in line:
                 # Incoming call (or existing call is ringing)
-                self._handleIncomingCall(lines)
+                await self._handleIncomingCall(lines)
                 return
             elif line.startswith(b'+CMTI'):
                 # New SMS message indication
-                self._handleSmsReceived(line)
+                await self._handleSmsReceived(line)
                 return
             elif line.startswith(b'+CUSD'):
                 # USSD notification - either a response or a MT-USSD ("push USSD") message
@@ -1385,7 +1385,7 @@ class GsmModem(SerialComms):
         """
         return self._handleCallEnded(regexMatch, callId, True)
 
-    def _handleSmsReceived(self, notificationLine):
+    async def _handleSmsReceived(self, notificationLine):
         """ Handler for "new SMS" unsolicited notification line """
         self.log.debug('SMS message received')
         if self.smsReceivedCallback is not None:
@@ -1393,23 +1393,23 @@ class GsmModem(SerialComms):
             if cmtiMatch:
                 msgMemory = cmtiMatch.group(1)
                 msgIndex = cmtiMatch.group(2)
-                sms = self.readStoredSms(msgIndex, msgMemory)
+                sms = await self.readStoredSms(msgIndex, msgMemory)
                 try:
                     self.smsReceivedCallback(sms)
                 except Exception:
                     self.log.error('error in smsReceivedCallback', exc_info=True)
                 else:
-                    self.deleteStoredSms(msgIndex)
+                    await self.deleteStoredSms(msgIndex)
     
-    def _handleSmsStatusReport(self, notificationLine):
+    async def _handleSmsStatusReport(self, notificationLine):
         """ Handler for SMS status reports """
         self.log.debug('SMS status report received')
         cdsiMatch = self.CDSI_REGEX.match(notificationLine)
         if cdsiMatch:
             msgMemory = cdsiMatch.group(1)
             msgIndex = cdsiMatch.group(2)
-            report = self.readStoredSms(msgIndex, msgMemory)
-            self.deleteStoredSms(msgIndex)
+            report = await self.readStoredSms(msgIndex, msgMemory)
+            await self.deleteStoredSms(msgIndex)
             # Update sent SMS status if possible
             if report.reference in self.sentSms:
                 self.sentSms[report.reference].report = report
