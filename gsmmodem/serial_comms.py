@@ -101,7 +101,6 @@ class SerialComms(object):
         # raise NotImplementedError
 
     async def data(self, data):
-        print('##### got data {}'.format(data))
         if self.reply_future and not self.reply_future.done():
             # A response event has been set up (another thread is waiting for this response)
             last_line = None
@@ -141,7 +140,7 @@ class SerialComms(object):
                         self._notification.append(line)
 
                 self.log.debug('notification: %s', self._notification)
-                self.notifyCallback(self._notification)
+                await self.notifyCallback(self._notification)
                 self._notification = []
 
                 self.notification_text = b''

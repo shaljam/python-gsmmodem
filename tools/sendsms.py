@@ -70,7 +70,7 @@ def main():
         sys.exit(1)
     else:
         print('\nPlease type your message and press enter to send it:')
-        text = raw_input('> ')
+        text = input('> ')
         if args.deliver:
             print ('\nSending SMS and waiting for delivery report...')
         else:

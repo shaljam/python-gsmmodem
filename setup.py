@@ -112,7 +112,8 @@ Bundled utilities:
       
       packages=['gsmmodem', 'gsmtermlib'],
       package_dir = {'gsmtermlib': 'tools/gsmtermlib'},
-      scripts=['tools/gsmterm.py', 'tools/sendsms.py', 'tools/identify-modem.py'],
+      scripts=['tools/gsmterm.py', 'tools/sendsms.py', 'tools/identify-modem.py', 'tools/gsmmodem-test.py',
+               'tools/receive-test.py'],
       install_requires=requires,
       tests_require=tests_require,
       extras_require={'docs': ['sphinx']},
