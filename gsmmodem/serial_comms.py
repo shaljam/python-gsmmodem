@@ -51,6 +51,8 @@ class SerialComms(object):
         self.reply_future = None
         self.notification_text = b''
 
+        self.response_text = b''
+
     def _placeholderCallback(self, *args, **kwargs):
         """ Placeholder callback function (does nothing) """
 
@@ -102,42 +104,50 @@ class SerialComms(object):
 
     async def data(self, data):
         if self.reply_future and not self.reply_future.done():
-            # A response event has been set up (another thread is waiting for this response)
-            last_line = None
-            seen_expected = False
-            for line in data.split(b'\r\n'):
-                if line:
-                    self._response.append(line)
-                    last_line = line
-                    if self._expectResponseTermSeq == line:
+
+            self.log.debug('response data: {} _expectResponseTermSeq {}'.format(data, self._expectResponseTermSeq))
+
+            self.response_text += data
+
+            done = data.endswith(b'\r\n') or data.endswith(b'> ')
+
+            if done:
+                last_line = None
+                seen_expected = False
+
+                for line in self.response_text.split(b'\r\n'):
+                    if line:
+                        self._response.append(line)
+                        last_line = line
+
+                        if self._expectResponseTermSeq == line:
+                            seen_expected = True
+
+                if len(self._response) == 0:
+                    last_line = self.response_text
+
+                    if self._expectResponseTermSeq == self.response_text:
                         seen_expected = True
 
-            if seen_expected or (last_line and self.RESPONSE_TERM.match(last_line)):
-                # End of response reached; notify waiting thread
-                self.log.debug('response: %s', self._response)
-                if self.reply_future and not self.reply_future.done():
-                    self.reply_future.set_result(self._response)
+                if seen_expected or (last_line and self.RESPONSE_TERM.match(last_line)):
+                    # End of response reached; notify waiting thread
+                    self.log.debug('response: %s', self._response)
+                    if self.reply_future and not self.reply_future.done():
+                        self.reply_future.set_result(self._response)
+
+                self.response_text = b''
         else:
-            # Nothing was waiting for this - treat it as a notification
-            done = data.endswith(b'\r\n')
-            # for line in data.split(b'\r\n'):
-            #     if line:
-            #         self._notification.append(line)
-            #         last_line = line
-            #
-            # if last_line and self.RESPONSE_TERM.match(last_line):
-            #     # End of response reached; notify waiting thread
-            #     self.log.debug('response: %s', self._response)
-            #     if self.reply_future and not self.reply_future.done():
-            #         self.reply_future.set_result(self._response)
+            self.log.debug('notification data: %s', data)
+
             self.notification_text += data
-            # if self.serial.inWaiting() == 0:
-            # No more chars on the way for this notification - notify higher-level callback
-            #print 'notification:', self._notification
+
+            done = data.endswith(b'\r\n')
+
             if done:
                 for line in self.notification_text.split(b'\r\n'):
                     if line:
                         self._notification.append(line)
+                        last_line = line
 
                 self.log.debug('notification: %s', self._notification)
                 await self.notifyCallback(self._notification)
