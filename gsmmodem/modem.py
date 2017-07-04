@@ -371,7 +371,7 @@ class GsmModem(SerialComms):
                     break
             else:
                 # Suppported memory types look fine, continue
-                preferredMemoryTypes = (b'"ME"', b'"SM"', b'"SR"')
+                preferredMemoryTypes = (b'"SM"', b'"SM"', b'"SM"')
                 cpmsItems = [''] * len(cpmsSupport)
                 for i in xrange(len(cpmsSupport)):
                     for memType in preferredMemoryTypes:
