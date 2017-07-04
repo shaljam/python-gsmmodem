@@ -419,38 +419,7 @@ class GsmModem(SerialComms):
 
         self.connection_future.set_result(None)
 
-
-
-
-    # async def data(self, data):
-    #     # print('##### got data {}'.format(data))
-    #     matches = None
-    #     for line in data.split(b'\r\n'):
-    #         if line:
-    #             self.response.append(line)
-    #             print('line {}'.format(line))
-    #             matches = not checkForResponseTerm or self.RESPONSE_TERM.match(line)
-    #
-    #     print('response: {} matches {}'.format(self.response, matches))
-    #
-    #     if len(self.response) > 0 and matches:
-    #         if self.reply_future and not self.reply_future.done():
-    #             self.reply_future.set_result(self.response)
-    #             self.response = []
-    #
-    #     # if self.last_command == CommandEnum.reset:
-    #     #     # reset configuration response
-    #     #     self.last_command = CommandEnum.echo_off
-    #     #     await self.write('ATE0')  # echo off
-    #     # elif self.last_command == CommandEnum.echo_off:
-    #     #     pass
-    #     # elif self.last_command == CommandEnum.supported_commands:
-    #     #     self._commands = self.process_supported_commands(data)
-    #     #     print('got commands {}'.format(self._commands))
-
-
     def process_supported_commands(self, response):
-        print('hey {}'.format(response))
         if len(response) == 2:  # Single-line response, comma separated
             commands = response[0]
             if commands.startswith(b'+CLAC'):
@@ -925,7 +894,6 @@ class GsmModem(SerialComms):
 
 
     async def sendSms(self, destination, text, waitForDeliveryReport=False, deliveryTimeout=15, sendFlash=False):
-        print('sendSms')
         """ Send an SMS text message
 
         :param destination: the recipient's phone number
@@ -1011,8 +979,6 @@ class GsmModem(SerialComms):
             self._ussdSessionFuture = None # Cancel the thread sync lock
             raise
 
-        print('csud {}'.format(cusdResponse))
-
         # Some modems issue the +CUSD response before the acknowledgment "OK" - check for that
         if len(cusdResponse) > 1:
             cusdResponseFound = lineStartingWith(b'+CUSD', cusdResponse) != None
@@ -1041,7 +1007,6 @@ class GsmModem(SerialComms):
             queryResponse = await self.write('AT+CCFC={0},2'.format(d(querytype)), timeout=responseTimeout) # Should respond with "OK"
         except Exception:
             raise
-        print(queryResponse)
         return True
 
     async def setForwarding(self, fwdType, fwdEnable, fwdNumber, responseTimeout=15):
@@ -1058,7 +1023,6 @@ class GsmModem(SerialComms):
         except Exception:
             raise
             return False
-        print(queryResponse)
         return queryResponse
 
     async def dial(self, number, timeout=5, callStatusUpdateCallbackFunc=None):
