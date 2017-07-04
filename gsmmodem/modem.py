@@ -1106,7 +1106,7 @@ class GsmModem(SerialComms):
         :return: A list of Sms objects containing the messages read
         :rtype: list
         """
-        self._setSmsMemory(readDelete=memory)
+        await self._setSmsMemory(readDelete=memory)
         messages = []
         delMessages = set()
         if self._smsTextMode:
@@ -1172,7 +1172,7 @@ class GsmModem(SerialComms):
         if delete:
             if status == Sms.STATUS_ALL:
                 # Delete all messages
-                self.deleteMultipleStoredSms()
+                await self.deleteMultipleStoredSms()
             else:
                 for msgIndex in delMessages:
                     await self.deleteStoredSms(msgIndex)
@@ -1508,7 +1508,7 @@ class GsmModem(SerialComms):
         :raise CommandError: if unable to delete the stored messages
         """
         if 0 < delFlag <= 4:
-            self._setSmsMemory(readDelete=memory)
+            await self._setSmsMemory(readDelete=memory)
             await self.write('AT+CMGD=1,{0}'.format(d(delFlag)))
         else:
             raise ValueError('"delFlag" must be in range [1,4]')
