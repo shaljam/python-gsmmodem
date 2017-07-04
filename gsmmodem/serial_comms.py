@@ -157,6 +157,8 @@ class SerialComms(object):
 
 
 class Output(asyncio.Protocol):
+    log = logging.getLogger('gsmmodem.serial_comms.Output')
+
     def __init__(self, connector):
         super().__init__()
         self.connector = connector
