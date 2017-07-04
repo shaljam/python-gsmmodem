@@ -535,9 +535,9 @@ def _decodeDataCoding(octet):
 
 def nibble2octet(o):
     if o % 2:
-        return o / 2 + 1
+        return o // 2 + 1
     else:
-        return o / 2
+        return o // 2
 
 def _decodeAddressField(byteIter, smscField=False, log=False):
     """ Decodes the address field at the current position of the bytearray iterator
