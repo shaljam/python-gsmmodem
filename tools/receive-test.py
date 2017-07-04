@@ -60,7 +60,15 @@ async def check_modem():
 
 
 def sms_received(sms):
-    print('received sms {}'.format(sms.text))
+    sms_props = {
+        'number': sms.number,
+        'text': sms.text,
+        'smsc': sms.smsc,
+        'status': sms.status,
+        'time': sms.time,
+        'udh': sms.udh
+    }
+    print('received sms {}'.format(sms_props))
 
 
 async def close_modem():
