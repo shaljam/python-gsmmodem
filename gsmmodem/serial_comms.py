@@ -154,7 +154,7 @@ class Output(asyncio.Protocol):
         self.connection_lost_future = asyncio.Future()
 
     def connection_made(self, transport):
-        print('port opened', transport)
+        self.log.debug('port opened {}'.format(transport))
         super().connection_made(transport)
         self.transport = transport
         if self.connection_lost_future.done():
@@ -164,25 +164,25 @@ class Output(asyncio.Protocol):
         asyncio.ensure_future(self.connector.connected())
 
     def data_received(self, data):
-        print('data received', repr(data))
+        self.log.debug('data received {}'.format(repr(data)))
         asyncio.ensure_future(self.connector.data(data))
         # if b'\n' in data:
         #     self.transport.close()
 
     def connection_lost(self, exc):
-        print('port closed')
+        self.log.debug('port closed {}')
         super().connection_lost(exc)
         self.transport = None
         if not self.connection_lost_future.done():
             self.connection_lost_future.set_result(None)
 
     def pause_writing(self):
-        print('pause writing')
+        self.log.debug('pause writing')
         print(self.transport.get_write_buffer_size())
 
     def resume_writing(self):
-        print(self.transport.get_write_buffer_size())
-        print('resume writing')
+        self.log.debug('transport buffer size: {}'.format(self.transport.get_write_buffer_size()))
+        self.log.debug('resume writing')
 
     def send(self, data):
         self.transport.write(data)
