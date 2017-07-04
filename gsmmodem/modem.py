@@ -11,6 +11,7 @@ import threading
 import time
 import weakref
 from enum import Enum
+import traceback
 
 from gsmmodem.exceptions import EncodingError
 # from . import compat # For Python 2.6 compatibility
@@ -1147,19 +1148,24 @@ class GsmModem(SerialComms):
                 if not readPdu:
                     cmglMatch = cmglRegex.match(line)
                     if cmglMatch:
+                        self.log.debug('CMGL line matched {} for line {}'.format(cmglMatch, line))
                         msgIndex = int(cmglMatch.group(1))
                         msgStat = int(cmglMatch.group(2))
                         readPdu = True
+                    else:
+                        self.log.debug('CMGL line did NOT match {} for line {}'.format(cmglMatch, line))
                 else:
                     try:
                         smsDict = decodeSmsPdu(line)
                     except EncodingError:
                         self.log.debug('Discarding line from +CMGL response: %s', line)
                     except:
+                        self.log.debug('Unknown exception when decoding line from +CMGL response: {}\n{}', line, traceback.format_exc())
                         pass
                         # dirty fix warning: https://github.com/yuriykashin/python-gsmmodem/issues/1
                         # todo: make better fix
                     else:
+                        self.log.debug('PDU decoded for line from +CMGL response {} with type {}'.format(line, smsDict['type']))
                         if smsDict['type'] == 'SMS-DELIVER':
                             sms = ReceivedSms(self, int(msgStat), smsDict['number'], smsDict['time'], smsDict['text'], smsDict['smsc'], smsDict.get('udh', []))
                         elif smsDict['type'] == 'SMS-STATUS-REPORT':
