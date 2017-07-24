@@ -1545,17 +1545,17 @@ class GsmModem(SerialComms):
             self.log.debug('Multiple +CUSD responses received; filtering...')
             # Some modems issue a non-standard "extra" +CUSD notification for releasing the session
             for cusdMatch in cusdMatches:
-                if cusdMatch.group(1) == '2':
+                if cusdMatch.group(1) == b'2':
                     # Set the session to inactive, but ignore the message
                     self.log.debug('Ignoring "session release" message: %s', cusdMatch.group(2))
                     sessionActive = False
                 else:
                     # Not a "session release" message
                     message = cusdMatch.group(2)
-                    if sessionActive and cusdMatch.group(1) != '1':
+                    if sessionActive and cusdMatch.group(1) != b'1':
                         sessionActive = False
         else:
-            sessionActive = cusdMatches[0].group(1) == '1'
+            sessionActive = cusdMatches[0].group(1) == b'1'
             message = cusdMatches[0].group(2)
         return Ussd(self, sessionActive, message)
 
@@ -1738,7 +1738,7 @@ class Ussd(object):
         self.sessionActive = sessionActive
         self.message = message
 
-    def reply(self, message):
+    async def reply(self, message):
         """ Sends a reply to this USSD message in the same USSD session
 
         :raise InvalidStateException: if the USSD session is not active (i.e. it has ended)
@@ -1746,17 +1746,17 @@ class Ussd(object):
         :return: The USSD response message/session (as a Ussd object)
         """
         if self.sessionActive:
-            return self._gsmModem.sendUssd(message)
+            return await self._gsmModem.sendUssd(message)
         else:
             raise InvalidStateException('USSD session is inactive')
 
-    def cancel(self):
+    async def cancel(self):
         """ Terminates/cancels the USSD session (without sending a reply)
 
         Does nothing if the USSD session is inactive.
         """
         if self.sessionActive:
-            self._gsmModem.write('AT+CUSD=2')
+            await self._gsmModem.write('AT+CUSD=2')
 
 
 class CommandEnum(Enum):
