@@ -204,6 +204,8 @@ class GsmModem(SerialComms):
         # self.response = []
         self.loop = asyncio.get_event_loop()
 
+        self.read_write_lock = asyncio.Lock()
+
     def _placeHolderCallback(self, *args):
         """ Does nothing """
         self.log.debug('called with args: {0}'.format(args))
@@ -504,7 +506,6 @@ class GsmModem(SerialComms):
         :return: A list containing the response lines from the modem, or None if waitForResponse is False
         :rtype: list
         """
-
         if isinstance(data, unicode):
             data = bytes(data,"ascii")
 
@@ -909,56 +910,56 @@ class GsmModem(SerialComms):
         :raise CommandError: if an error occurs while attempting to send the message
         :raise TimeoutException: if the operation times out
         """
+        with await self.read_write_lock:
+            # Check input text to select appropriate mode (text or PDU)
+            # Check encoding
+            try:
+                encodedText = encodeGsm7(text)
+            except ValueError:
+                encodedText = None
+                await self.set_smsTextMode(False)
 
-        # Check input text to select appropriate mode (text or PDU)
-        # Check encoding
-        try:
-            encodedText = encodeGsm7(text)
-        except ValueError:
-            encodedText = None
-            await self.set_smsTextMode(False)
+            # Check message length
+            if len(text) > 160:
+                await self.set_smsTextMode(False)
 
-        # Check message length
-        if len(text) > 160:
-            await self.set_smsTextMode(False)
-
-        # Send SMS via AT commands
-        if self._smsTextMode:
-            await self.write('AT+CMGS="{0}"'.format(d(destination)), timeout=5, expectedResponseTermSeq=b'> ')
-            result = lineStartingWith(b'+CMGS:', await self.write(text, timeout=35, writeTerm=CTRLZ))
-        else:
-            # Set GSM modem SMS encoding format
-            # Encode message text and set data coding scheme based on text contents
-            if encodedText == None:
-                # Cannot encode text using GSM-7; use UCS2 instead
-                await self.set_smsEncoding('UCS2')
-                # await setattr(self, 'smsEncoding', 'UCS2')
-                # self.smsEncoding = 'UCS2'
+            # Send SMS via AT commands
+            if self._smsTextMode:
+                await self.write('AT+CMGS="{0}"'.format(d(destination)), timeout=5, expectedResponseTermSeq=b'> ')
+                result = lineStartingWith(b'+CMGS:', await self.write(text, timeout=35, writeTerm=CTRLZ))
             else:
-                await self.set_smsEncoding('GSM')
-                # self.smsEncoding = 'GSM'
+                # Set GSM modem SMS encoding format
+                # Encode message text and set data coding scheme based on text contents
+                if encodedText == None:
+                    # Cannot encode text using GSM-7; use UCS2 instead
+                    await self.set_smsEncoding('UCS2')
+                    # await setattr(self, 'smsEncoding', 'UCS2')
+                    # self.smsEncoding = 'UCS2'
+                else:
+                    await self.set_smsEncoding('GSM')
+                    # self.smsEncoding = 'GSM'
 
-            pdus = encodeSmsSubmitPdu(destination, text, reference=self._smsRef, sendFlash=sendFlash)
-            for pdu in pdus:
-                await self.write('AT+CMGS={0}'.format(pdu.tpduLength), timeout=5, expectedResponseTermSeq=b'> ')
-                result = lineStartingWith(b'+CMGS:', await self.write(str(pdu), timeout=35, writeTerm=CTRLZ)) # example: +CMGS: xx
-        if result == None:
-            raise CommandError('Modem did not respond with +CMGS response')
-        reference = int(result[7:])
-        self._smsRef = reference + 1
-        if self._smsRef > 255:
-            self._smsRef = 0
-        sms = SentSms(destination, text, reference)
-        # Add a weak-referenced entry for this SMS (allows us to update the SMS state if a status report is received)
-        self.sentSms[reference] = sms
-        if waitForDeliveryReport:
-            self._smsStatusReportEvent = threading.Event()
-            if self._smsStatusReportEvent.wait(deliveryTimeout):
-                self._smsStatusReportEvent = None
-            else: # Response timed out
-                self._smsStatusReportEvent = None
-                raise TimeoutException()
-        return sms
+                pdus = encodeSmsSubmitPdu(destination, text, reference=self._smsRef, sendFlash=sendFlash)
+                for pdu in pdus:
+                    await self.write('AT+CMGS={0}'.format(pdu.tpduLength), timeout=5, expectedResponseTermSeq=b'> ')
+                    result = lineStartingWith(b'+CMGS:', await self.write(str(pdu), timeout=35, writeTerm=CTRLZ)) # example: +CMGS: xx
+            if result == None:
+                raise CommandError('Modem did not respond with +CMGS response')
+            reference = int(result[7:])
+            self._smsRef = reference + 1
+            if self._smsRef > 255:
+                self._smsRef = 0
+            sms = SentSms(destination, text, reference)
+            # Add a weak-referenced entry for this SMS (allows us to update the SMS state if a status report is received)
+            self.sentSms[reference] = sms
+            if waitForDeliveryReport:
+                self._smsStatusReportEvent = threading.Event()
+                if self._smsStatusReportEvent.wait(deliveryTimeout):
+                    self._smsStatusReportEvent = None
+                else: # Response timed out
+                    self._smsStatusReportEvent = None
+                    raise TimeoutException()
+            return sms
 
     async def sendUssd(self, ussdString, responseTimeout=15):
         """ Starts a USSD session by dialing the the specified USSD string, or \
@@ -972,30 +973,31 @@ class GsmModem(SerialComms):
         :return: The USSD response message/session (as a Ussd object)
         :rtype: gsmmodem.modem.Ussd
         """
-        self._ussdSessionFuture = asyncio.Future()
-        try:
-            cusdResponse = await self.write('AT+CUSD=1,"{0}",15'.format(d(ussdString)), timeout=responseTimeout) # Should respond with "OK"
-        except Exception:
-            self._ussdSessionFuture.set_result(None)
-            self._ussdSessionFuture = None # Cancel the thread sync lock
-            raise
+        with await self.read_write_lock:
+            self._ussdSessionFuture = asyncio.Future()
+            try:
+                cusdResponse = await self.write('AT+CUSD=1,"{0}",15'.format(d(ussdString)), timeout=responseTimeout) # Should respond with "OK"
+            except Exception:
+                self._ussdSessionFuture.set_result(None)
+                self._ussdSessionFuture = None # Cancel the thread sync lock
+                raise
 
-        # Some modems issue the +CUSD response before the acknowledgment "OK" - check for that
-        if len(cusdResponse) > 1:
-            cusdResponseFound = lineStartingWith(b'+CUSD', cusdResponse) != None
-            if cusdResponseFound:
+            # Some modems issue the +CUSD response before the acknowledgment "OK" - check for that
+            if len(cusdResponse) > 1:
+                cusdResponseFound = lineStartingWith(b'+CUSD', cusdResponse) != None
+                if cusdResponseFound:
+                    self._ussdSessionFuture = None
+                    return self._parseCusdResponse(cusdResponse)
+            # Wait for the +CUSD notification message
+            # await asyncio.sleep(responseTimeout)
+
+            try:
+                ussdResponse = await asyncio.wait_for(self._ussdSessionFuture, timeout=responseTimeout)
                 self._ussdSessionFuture = None
-                return self._parseCusdResponse(cusdResponse)
-        # Wait for the +CUSD notification message
-        # await asyncio.sleep(responseTimeout)
-
-        try:
-            ussdResponse = await asyncio.wait_for(self._ussdSessionFuture, timeout=responseTimeout)
-            self._ussdSessionFuture = None
-            return ussdResponse
-        except asyncio.TimeoutError:
-            self._ussdSessionFuture = None
-            raise TimeoutException()
+                return ussdResponse
+            except asyncio.TimeoutError:
+                self._ussdSessionFuture = None
+                raise TimeoutException()
 
     async def checkForwarding(self, querytype, responseTimeout=15):
         """ Check forwarding status: 0=Unconditional, 1=Busy, 2=NoReply, 3=NotReach, 4=AllFwd, 5=AllCondFwd
@@ -1107,82 +1109,83 @@ class GsmModem(SerialComms):
         :return: A list of Sms objects containing the messages read
         :rtype: list
         """
-        await self._setSmsMemory(readDelete=memory)
-        messages = []
-        delMessages = set()
-        if self._smsTextMode:
-            cmglRegex= re.compile(b'^\+CMGL: (\d+),"([^"]+)","([^"]+)",[^,]*,"([^"]+)"$')
-            for key, val in dictItemsIter(Sms.TEXT_MODE_STATUS_MAP):
-                if status == val:
-                    statusStr = key
-                    break
-            else:
-                raise ValueError('Invalid status value: {0}'.format(status))
-            result = await self.write('AT+CMGL="{0}"'.format(d(statusStr)))
-            msgLines = []
-            msgIndex = msgStatus = number = msgTime = None
-            for line in result:
-                cmglMatch = cmglRegex.match(line)
-                if cmglMatch:
-                    # New message; save old one if applicable
-                    if msgIndex != None and len(msgLines) > 0:
-                        msgText = '\n'.join(msgLines)
-                        msgLines = []
-                        messages.append(ReceivedSms(self, Sms.TEXT_MODE_STATUS_MAP[msgStatus], number, parseTextModeTimeStr(msgTime), msgText))
-                        delMessages.add(int(msgIndex))
-                    msgIndex, msgStatus, number, msgTime = cmglMatch.groups()
-                    msgLines = []
+        with await self.read_write_lock:
+            await self._setSmsMemory(readDelete=memory)
+            messages = []
+            delMessages = set()
+            if self._smsTextMode:
+                cmglRegex= re.compile(b'^\+CMGL: (\d+),"([^"]+)","([^"]+)",[^,]*,"([^"]+)"$')
+                for key, val in dictItemsIter(Sms.TEXT_MODE_STATUS_MAP):
+                    if status == val:
+                        statusStr = key
+                        break
                 else:
-                    if line != b'OK':
-                        msgLines.append(line)
-            if msgIndex != None and len(msgLines) > 0:
-                msgText = '\n'.join(msgLines)
+                    raise ValueError('Invalid status value: {0}'.format(status))
+                result = await self.write('AT+CMGL="{0}"'.format(d(statusStr)))
                 msgLines = []
-                messages.append(ReceivedSms(self, Sms.TEXT_MODE_STATUS_MAP[msgStatus], number, parseTextModeTimeStr(msgTime), msgText))
-                delMessages.add(int(msgIndex))
-        else:
-            cmglRegex = re.compile(b'^\+CMGL:\s*(\d+),\s*(\d+),.*$')
-            readPdu = False
-            result = await self.write('AT+CMGL={0}'.format(d(status)))
-            for line in result:
-                if not readPdu:
+                msgIndex = msgStatus = number = msgTime = None
+                for line in result:
                     cmglMatch = cmglRegex.match(line)
                     if cmglMatch:
-                        self.log.debug('CMGL line matched {} for line {}'.format(cmglMatch, line))
-                        msgIndex = int(cmglMatch.group(1))
-                        msgStat = int(cmglMatch.group(2))
-                        readPdu = True
+                        # New message; save old one if applicable
+                        if msgIndex != None and len(msgLines) > 0:
+                            msgText = '\n'.join(msgLines)
+                            msgLines = []
+                            messages.append(ReceivedSms(self, Sms.TEXT_MODE_STATUS_MAP[msgStatus], number, parseTextModeTimeStr(msgTime), msgText))
+                            delMessages.add(int(msgIndex))
+                        msgIndex, msgStatus, number, msgTime = cmglMatch.groups()
+                        msgLines = []
                     else:
-                        self.log.debug('CMGL line did NOT match {} for line {}'.format(cmglMatch, line))
-                else:
-                    try:
-                        smsDict = decodeSmsPdu(line)
-                    except EncodingError:
-                        self.log.debug('Discarding line from +CMGL response: %s', line)
-                    except:
-                        self.log.debug('Unknown exception when decoding line from +CMGL response: {}\n{}', line, traceback.format_exc())
-                        pass
-                        # dirty fix warning: https://github.com/yuriykashin/python-gsmmodem/issues/1
-                        # todo: make better fix
-                    else:
-                        self.log.debug('PDU decoded for line from +CMGL response {} with type {}'.format(line, smsDict['type']))
-                        if smsDict['type'] == 'SMS-DELIVER':
-                            sms = ReceivedSms(self, int(msgStat), smsDict['number'], smsDict['time'], smsDict['text'], smsDict['smsc'], smsDict.get('udh', []))
-                        elif smsDict['type'] == 'SMS-STATUS-REPORT':
-                            sms = StatusReport(self, int(msgStat), smsDict['reference'], smsDict['number'], smsDict['time'], smsDict['discharge'], smsDict['status'])
-                        else:
-                            raise CommandError('Invalid PDU type for readStoredSms(): {0}'.format(smsDict['type']))
-                        messages.append(sms)
-                        delMessages.add(msgIndex)
-                        readPdu = False
-        if delete:
-            if status == Sms.STATUS_ALL:
-                # Delete all messages
-                await self.deleteMultipleStoredSms()
+                        if line != b'OK':
+                            msgLines.append(line)
+                if msgIndex != None and len(msgLines) > 0:
+                    msgText = '\n'.join(msgLines)
+                    msgLines = []
+                    messages.append(ReceivedSms(self, Sms.TEXT_MODE_STATUS_MAP[msgStatus], number, parseTextModeTimeStr(msgTime), msgText))
+                    delMessages.add(int(msgIndex))
             else:
-                for msgIndex in delMessages:
-                    await self.deleteStoredSms(msgIndex)
-        return messages
+                cmglRegex = re.compile(b'^\+CMGL:\s*(\d+),\s*(\d+),.*$')
+                readPdu = False
+                result = await self.write('AT+CMGL={0}'.format(d(status)))
+                for line in result:
+                    if not readPdu:
+                        cmglMatch = cmglRegex.match(line)
+                        if cmglMatch:
+                            self.log.debug('CMGL line matched {} for line {}'.format(cmglMatch, line))
+                            msgIndex = int(cmglMatch.group(1))
+                            msgStat = int(cmglMatch.group(2))
+                            readPdu = True
+                        else:
+                            self.log.debug('CMGL line did NOT match {} for line {}'.format(cmglMatch, line))
+                    else:
+                        try:
+                            smsDict = decodeSmsPdu(line)
+                        except EncodingError:
+                            self.log.debug('Discarding line from +CMGL response: %s', line)
+                        except:
+                            self.log.debug('Unknown exception when decoding line from +CMGL response: {}\n{}', line, traceback.format_exc())
+                            pass
+                            # dirty fix warning: https://github.com/yuriykashin/python-gsmmodem/issues/1
+                            # todo: make better fix
+                        else:
+                            self.log.debug('PDU decoded for line from +CMGL response {} with type {}'.format(line, smsDict['type']))
+                            if smsDict['type'] == 'SMS-DELIVER':
+                                sms = ReceivedSms(self, int(msgStat), smsDict['number'], smsDict['time'], smsDict['text'], smsDict['smsc'], smsDict.get('udh', []))
+                            elif smsDict['type'] == 'SMS-STATUS-REPORT':
+                                sms = StatusReport(self, int(msgStat), smsDict['reference'], smsDict['number'], smsDict['time'], smsDict['discharge'], smsDict['status'])
+                            else:
+                                raise CommandError('Invalid PDU type for readStoredSms(): {0}'.format(smsDict['type']))
+                            messages.append(sms)
+                            delMessages.add(msgIndex)
+                            readPdu = False
+            if delete:
+                if status == Sms.STATUS_ALL:
+                    # Delete all messages
+                    await self.deleteMultipleStoredSms()
+                else:
+                    for msgIndex in delMessages:
+                        await self.deleteStoredSms(msgIndex)
+            return messages
 
     async def _handleModemNotification(self, lines):
         """ Handler for unsolicited notifications from the modem
@@ -1230,7 +1233,7 @@ class GsmModem(SerialComms):
                 self._handleSmsStatusReportTe(next_line_is_te_statusreport_length, line)
                 return
             elif line.startswith(b'+DTMF'):
-                # New incoming DTMF 
+                # New incoming DTMF
                 self._handleIncomingDTMF(line)
                 return
             else:
@@ -1261,49 +1264,50 @@ class GsmModem(SerialComms):
             return self.dtmfpool.pop(0)
 
     async def _handleIncomingCall(self, lines):
-        self.log.debug('Handling incoming call')
-        ringLine = d(lines.pop(0))
-        if self._extendedIncomingCallIndication:
-            try:
-                callType = ringLine.split(' ', 1)[1]
-            except IndexError:
-                # Some external 3G scripts modify incoming call indication settings (issue #18)
-                self.log.debug('Extended incoming call indication format changed externally; re-enabling...')
-                callType = None
+        with await self.read_write_lock:
+            self.log.debug('Handling incoming call')
+            ringLine = d(lines.pop(0))
+            if self._extendedIncomingCallIndication:
                 try:
-                    # Re-enable extended format of incoming indication (optional)
-                    await self.write('AT+CRC=1')
-                except CommandError:
-                    self.log.warn('Extended incoming call indication format changed externally; unable to re-enable')
-                    self._extendedIncomingCallIndication = False
-        else:
-            callType = None
-        if self._callingLineIdentification and len(lines) > 0:
-            clipLine = lines.pop(0)
-            clipMatch = self.CLIP_REGEX.match(clipLine)
-            if clipMatch:
-                callerNumber = clipMatch.group(1)
-                ton = clipMatch.group(2)
-                #TODO: re-add support for this
-                callerName = None
-                #callerName = clipMatch.group(3)
-                #if callerName != None and len(callerName) == 0:
-                #    callerName = None
+                    callType = ringLine.split(' ', 1)[1]
+                except IndexError:
+                    # Some external 3G scripts modify incoming call indication settings (issue #18)
+                    self.log.debug('Extended incoming call indication format changed externally; re-enabling...')
+                    callType = None
+                    try:
+                        # Re-enable extended format of incoming indication (optional)
+                        await self.write('AT+CRC=1')
+                    except CommandError:
+                        self.log.warn('Extended incoming call indication format changed externally; unable to re-enable')
+                        self._extendedIncomingCallIndication = False
+            else:
+                callType = None
+            if self._callingLineIdentification and len(lines) > 0:
+                clipLine = lines.pop(0)
+                clipMatch = self.CLIP_REGEX.match(clipLine)
+                if clipMatch:
+                    callerNumber = clipMatch.group(1)
+                    ton = clipMatch.group(2)
+                    #TODO: re-add support for this
+                    callerName = None
+                    #callerName = clipMatch.group(3)
+                    #if callerName != None and len(callerName) == 0:
+                    #    callerName = None
+                else:
+                    callerNumber = ton = callerName = None
             else:
                 callerNumber = ton = callerName = None
-        else:
-            callerNumber = ton = callerName = None
 
-        call = None
-        for activeCall in dictValuesIter(self.activeCalls):
-            if activeCall.number == callerNumber:
-                call = activeCall
-                call.ringCount += 1
-        if call == None:
-            callId = len(self.activeCalls) + 1;
-            call = IncomingCall(self, callerNumber, ton, callerName, callId, callType)
-            self.activeCalls[callId] = call
-        self.incomingCallCallback(call)
+            call = None
+            for activeCall in dictValuesIter(self.activeCalls):
+                if activeCall.number == callerNumber:
+                    call = activeCall
+                    call.ringCount += 1
+            if call == None:
+                callId = len(self.activeCalls) + 1;
+                call = IncomingCall(self, callerNumber, ton, callerName, callId, callType)
+                self.activeCalls[callId] = call
+            self.incomingCallCallback(call)
 
     def _handleCallInitiated(self, regexMatch, callId=None, callType=1):
         """ Handler for "outgoing call initiated" event notification line """
@@ -1363,19 +1367,20 @@ class GsmModem(SerialComms):
 
     async def _handleSmsReceived(self, notificationLine):
         """ Handler for "new SMS" unsolicited notification line """
-        self.log.debug('SMS message received')
-        if self.smsReceivedCallback is not None:
-            cmtiMatch = self.CMTI_REGEX.match(notificationLine)
-            if cmtiMatch:
-                msgMemory = cmtiMatch.group(1)
-                msgIndex = cmtiMatch.group(2)
-                sms = await self.readStoredSms(msgIndex, msgMemory)
-                try:
-                    self.smsReceivedCallback(sms)
-                except Exception:
-                    self.log.error('error in smsReceivedCallback', exc_info=True)
-                else:
-                    await self.deleteStoredSms(msgIndex)
+        with await self.read_write_lock:
+            self.log.debug('SMS message received')
+            if self.smsReceivedCallback is not None:
+                cmtiMatch = self.CMTI_REGEX.match(notificationLine)
+                if cmtiMatch:
+                    msgMemory = cmtiMatch.group(1)
+                    msgIndex = cmtiMatch.group(2)
+                    sms = await self.readStoredSms(msgIndex, msgMemory)
+                    try:
+                        self.smsReceivedCallback(sms)
+                    except Exception:
+                        self.log.error('error in smsReceivedCallback', exc_info=True)
+                    else:
+                        await self.deleteStoredSms(msgIndex)
 
     async def _handleSmsStatusReport(self, notificationLine):
         """ Handler for SMS status reports """
