@@ -1499,7 +1499,11 @@ class GsmModem(SerialComms):
         :raise CommandError: if unable to delete the stored message
         """
         await self._setSmsMemory(readDelete=memory)
-        await self.write('AT+CMGD={0},0'.format(d(index)))
+        try:
+            await self.write('AT+CMGD={0},0'.format(d(index)))
+        except CmsError as cms_error:
+            self.log.critical('CmsError while reading stored SMS {}'.format(cms_error.code))
+            return
         # TODO: make a check how many params are supported by the modem and use the right command. For example, Siemens MC35, TC35 take only one parameter.
         #await self.write('AT+CMGD={0}'.format(index))
 
