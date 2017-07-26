@@ -1540,7 +1540,7 @@ class GsmModem(SerialComms):
             # Issue #20: Some modem/network combinations use \r\n as in-message EOL indicators;
             # - join lines to compensate for that (thanks to davidjb for the fix)
             # Also, look for more than one +CUSD response because of certain modems' strange behaviour
-            cusdMatches = list(self.CUSD_REGEX.finditer('\r\n'.join(lines)))
+            cusdMatches = list(self.CUSD_REGEX.finditer(b'\r\n'.join(lines)))
         else:
             # Single standard +CUSD response
             cusdMatches = [self.CUSD_REGEX.match(lines[0])]
