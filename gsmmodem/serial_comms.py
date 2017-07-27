@@ -66,10 +66,9 @@ class SerialComms(object):
 
         self.alive = True
         self.connection_future = asyncio.Future()
-        await self.connection_future
+        return await self.connection_future
 
     async def close(self):
-        print('closing...')
         if self.protocol:
             self.protocol.close()
         self.protocol = None
@@ -98,9 +97,8 @@ class SerialComms(object):
         else:
             self.protocol.send(data)
 
-    async def connected(self):
-        print('hi')
-        # raise NotImplementedError
+    def connected(self):
+        raise NotImplementedError
 
     async def data(self, data):
         if self.reply_future and not self.reply_future.done():
@@ -173,7 +171,7 @@ class Output(asyncio.Protocol):
             self.connection_lost_future = asyncio.Future()
 
         transport.serial.rts = False  # You can manipulate Serial object via transport
-        asyncio.ensure_future(self.connector.connected())
+        self.connector.connected()
 
     def data_received(self, data):
         self.log.debug('data received {}'.format(repr(data)))

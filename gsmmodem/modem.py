@@ -210,217 +210,225 @@ class GsmModem(SerialComms):
         """ Does nothing """
         self.log.debug('called with args: {0}'.format(args))
 
-    async def connected(self):
+    def connected(self):
+        # loop = asyncio.get_event_loop()
+        asyncio.ensure_future(self.connected_async())
+
+    async def connected_async(self):
         # Send some initialization commands to the modem
         try:
-            await self.write('ATZ')
-        except CommandError:
-            # Some modems require a SIM PIN at this stage already; unlock it now
-            # Attempt to enable detailed error messages (to catch incorrect PIN error)
-            # but ignore if it fails
-            await self.write('AT+CMEE=1', parseError=False)
-            await self._unlockSim(self.pin)
-            pinCheckComplete = True
-            await self.write('ATZ')  # reset configuration
-        else:
-            pinCheckComplete = False
-        await self.write('ATE0')  # echo off
-        try:
-            cfun = int(lineStartingWith(b'+CFUN:', await self.write('AT+CFUN?'))[7:])  # example response: +CFUN: 1
-            if cfun != 1:
-                await self.write('AT+CFUN=1')
-        except CommandError:
-            pass  # just ignore if the +CFUN command isn't supported
-
-        await self.write('AT+CMEE=1')  # enable detailed error messages (even if it has already been set - ATZ may reset this)
-        if not pinCheckComplete:
-            await self._unlockSim(self.pin)
-
-        # Get list of supported commands from modem
-        commands = await self.get_supportedCommands()
-        self._commands = commands
-
-        # Device-specific settings
-        callUpdateTableHint = 0  # unknown modem
-        enableWind = False
-        if commands != None:
-            if b'^CVOICE' in commands:
-                await self.write('AT^CVOICE=0', parseError=False)  # Enable voice calls
-            if b'+VTS' in commands:  # Check for DTMF sending support
-                Call.dtmfSupport = True
-            elif b'^DTMF' in commands:
-                # Huawei modems use ^DTMF to send DTMF tones
-                callUpdateTableHint = 1  # Huawei
-            if b'^USSDMODE' in commands:
-                # Enable Huawei text-mode USSD
-                await self.write('AT^USSDMODE=0', parseError=False)
-            if b'+WIND' in commands:
-                callUpdateTableHint = 2  # Wavecom
-                enableWind = True
-            elif b'+ZPAS' in commands:
-                callUpdateTableHint = 3  # ZTE
-        else:
-            # Try to enable general notifications on Wavecom-like device
-            enableWind = True
-
-        if enableWind:
             try:
-                wind = lineStartingWith(b'+WIND:',
-                                        await self.write('AT+WIND?'))  # Check current WIND value; example response: +WIND: 63
+                await self.write('ATZ')
             except CommandError:
-                # Modem does not support +WIND notifications. See if we can detect other known call update notifications
-                pass
+                # Some modems require a SIM PIN at this stage already; unlock it now
+                # Attempt to enable detailed error messages (to catch incorrect PIN error)
+                # but ignore if it fails
+                await self.write('AT+CMEE=1', parseError=False)
+                await self._unlockSim(self.pin)
+                pinCheckComplete = True
+                await self.write('ATZ')  # reset configuration
             else:
-                # Enable notifications for call setup, hangup, etc
-                if int(wind[7:]) != 50:
-                    await self.write('AT+WIND=50')
-                callUpdateTableHint = 2  # Wavecom
+                pinCheckComplete = False
+            await self.write('ATE0')  # echo off
+            try:
+                cfun = int(lineStartingWith(b'+CFUN:', await self.write('AT+CFUN?'))[7:])  # example response: +CFUN: 1
+                if cfun != 1:
+                    await self.write('AT+CFUN=1')
+            except CommandError:
+                pass  # just ignore if the +CFUN command isn't supported
 
-        # Attempt to identify modem type directly (if not already) - for outgoing call status updates
-        if callUpdateTableHint == 0:
-            if b'simcom' in (await self.manufacturer).lower():  # simcom modems support DTMF and don't support AT+CLAC
-                Call.dtmfSupport = True
-                await self.write('AT+DDET=1')  # enable detect incoming DTMF
+            await self.write('AT+CMEE=1')  # enable detailed error messages (even if it has already been set - ATZ may reset this)
+            if not pinCheckComplete:
+                await self._unlockSim(self.pin)
 
-            if (await self.manufacturer).lower() == 'huawei':
-                callUpdateTableHint = 1  # huawei
-            else:
-                # See if this is a ZTE modem that has not yet been identified based on supported commands
-                try:
-                    await self.write('AT+ZPAS?')
-                except CommandError:
-                    pass  # Not a ZTE modem
-                else:
+            # Get list of supported commands from modem
+            commands = await self.get_supportedCommands()
+            self._commands = commands
+
+            # Device-specific settings
+            callUpdateTableHint = 0  # unknown modem
+            enableWind = False
+            if commands != None:
+                if b'^CVOICE' in commands:
+                    await self.write('AT^CVOICE=0', parseError=False)  # Enable voice calls
+                if b'+VTS' in commands:  # Check for DTMF sending support
+                    Call.dtmfSupport = True
+                elif b'^DTMF' in commands:
+                    # Huawei modems use ^DTMF to send DTMF tones
+                    callUpdateTableHint = 1  # Huawei
+                if b'^USSDMODE' in commands:
+                    # Enable Huawei text-mode USSD
+                    await self.write('AT^USSDMODE=0', parseError=False)
+                if b'+WIND' in commands:
+                    callUpdateTableHint = 2  # Wavecom
+                    enableWind = True
+                elif b'+ZPAS' in commands:
                     callUpdateTableHint = 3  # ZTE
-        # Load outgoing call status updates based on identified modem features
-        if callUpdateTableHint == 1:
-            # Use Hauwei's ^NOTIFICATIONs
-            self.log.info('Loading Huawei call state update table')
-            self._callStatusUpdates = ((re.compile(b'^\^ORIG:(\d),(\d)$'), self._handleCallInitiated),
-                                       (re.compile(b'^\^CONN:(\d),(\d)$'), self._handleCallAnswered),
-                                       (re.compile(b'^\^CEND:(\d),(\d),(\d)+,(\d)+$'), self._handleCallEnded))
-            self._mustPollCallStatus = False
-            # Huawei modems use ^DTMF to send DTMF tones; use that instead
-            Call.DTMF_COMMAND_BASE = '^DTMF={cid},'
-            Call.dtmfSupport = True
-        elif callUpdateTableHint == 2:
-            # Wavecom modem: +WIND notifications supported
-            self.log.info('Loading Wavecom call state update table')
-            self._callStatusUpdates = ((re.compile(b'^\+WIND: 5,(\d)$'), self._handleCallInitiated),
-                                       (re.compile(b'^OK$'), self._handleCallAnswered),
-                                       (re.compile(b'^\+WIND: 6,(\d)$'), self._handleCallEnded))
-            self._waitForAtdResponse = False  # Wavecom modems return OK only when the call is answered
-            self._mustPollCallStatus = False
-            if commands == None:  # older modem, assume it has standard DTMF support
-                Call.dtmfSupport = True
-        elif callUpdateTableHint == 3:  # ZTE
-            # Use ZTE notifications ("CONNECT"/"HANGUP", but no "call initiated" notification)
-            self.log.info('Loading ZTE call state update table')
-            self._callStatusUpdates = ((re.compile(b'^CONNECT$'), self._handleCallAnswered),
-                                       (re.compile(b'^HANGUP:\s*(\d+)$'), self._handleCallEnded),
-                                       (re.compile(b'^OK$'), self._handleCallRejected))
-            self._waitForAtdResponse = False  # ZTE modems do not return an immediate  OK only when the call is answered
-            self._mustPollCallStatus = False
-            self._waitForCallInitUpdate = False  # ZTE modems do not provide "call initiated" updates
-            if commands == None:  # ZTE uses standard +VTS for DTMF
-                Call.dtmfSupport = True
-        else:
-            # Unknown modem - we do not know what its call updates look like. Use polling instead
-            self.log.info('Unknown/generic modem type - will use polling for call state updates')
-            self._mustPollCallStatus = True
-            self._pollCallStatusRegex = re.compile(b'^\+CLCC:\s+(\d+),(\d),(\d),(\d),([^,]),"([^,]*)",(\d+)$')
-            self._waitForAtdResponse = True  # Most modems return OK immediately after issuing ATD
-
-        # General meta-information setup
-        await self.write('AT+COPS=3,0', parseError=False)  # Use long alphanumeric name format
-
-        # SMS setup
-        await self.write('AT+CMGF={0}'.format(1 if self._smsTextMode else 0))  # Switch to text or PDU mode for SMS messages
-        self._compileSmsRegexes()
-        if self._smscNumber != None:
-            await self.write('AT+CSCA="{0}"'.format(d(self._smscNumber)))  # Set default SMSC number
-            currentSmscNumber = self._smscNumber
-        else:
-            currentSmscNumber = await self.smsc
-        # Some modems delete the SMSC number when setting text-mode SMS parameters; preserve it if needed
-        if currentSmscNumber != None:
-            self._smscNumber = None  # clear cache
-        if self.requestDelivery:
-            await self.write('AT+CSMP=49,167,0,0', parseError=False)  # Enable delivery reports
-        else:
-            await self.write('AT+CSMP=17,167,0,0', parseError=False)  # Not enable delivery reports
-        # ...check SMSC again to ensure it did not change
-        if currentSmscNumber != None and (await self.smsc) != currentSmscNumber:
-            await self.set_smsc(currentSmscNumber)
-
-        # Set message storage, but first check what the modem supports - example response: +CPMS: (("SM","BM","SR"),("SM"))
-        try:
-            cpmsLine = lineStartingWith(b'+CPMS', await self.write('AT+CPMS=?'))
-        except CommandError:
-            # Modem does not support AT+CPMS; SMS reading unavailable
-            self._smsReadSupported = False
-            self.log.warning('SMS preferred message storage query not supported by modem. SMS reading unavailable.')
-        else:
-            cpmsSupport = cpmsLine.split(b' ', 1)[1].split(b'),(')
-            # Do a sanity check on the memory types returned - Nokia S60 devices return empty strings, for example
-            for memItem in cpmsSupport:
-                if len(memItem) == 0:
-                    # No support for reading stored SMS via AT commands - probably a Nokia S60
-                    self._smsReadSupported = False
-                    self.log.warning(
-                        'Invalid SMS message storage support returned by modem. SMS reading unavailable. Response was: "%s"',
-                        cpmsLine)
-                    break
             else:
-                # Suppported memory types look fine, continue
-                preferredMemoryTypes = (b'"SM"', b'"SM"', b'"SM"')
-                cpmsItems = [''] * len(cpmsSupport)
-                for i in xrange(len(cpmsSupport)):
-                    for memType in preferredMemoryTypes:
-                        if memType in cpmsSupport[i]:
-                            if i == 0:
-                                self._smsMemReadDelete = memType
-                            cpmsItems[i] = memType.decode('ascii')
-                            break
-                await self.write('AT+CPMS={0}'.format(','.join(cpmsItems)))  # Set message storage
-            del cpmsSupport
-            del cpmsLine
+                # Try to enable general notifications on Wavecom-like device
+                enableWind = True
 
-        if self._smsReadSupported and (self.smsReceivedCallback or self.smsStatusReportCallback):
-            try:
-                await self.write('AT+CNMI=' + self.AT_CNMI)  # Set message notifications
-            except CommandError:
+            if enableWind:
                 try:
-                    await self.write('AT+CNMI=2,1,0,1,0')  # Set message notifications, using TE for delivery reports <ds>
+                    wind = lineStartingWith(b'+WIND:',
+                                            await self.write('AT+WIND?'))  # Check current WIND value; example response: +WIND: 63
                 except CommandError:
-                    # Message notifications not supported
-                    self._smsReadSupported = False
-                    self.log.warning('Incoming SMS notifications not supported by modem. SMS receiving unavailable.')
+                    # Modem does not support +WIND notifications. See if we can detect other known call update notifications
+                    pass
+                else:
+                    # Enable notifications for call setup, hangup, etc
+                    if int(wind[7:]) != 50:
+                        await self.write('AT+WIND=50')
+                    callUpdateTableHint = 2  # Wavecom
 
-        # Incoming call notification setup
-        try:
-            await self.write('AT+CLIP=1')  # Enable calling line identification presentation
-        except CommandError as clipError:
-            self._callingLineIdentification = False
-            self.log.warning(
-                'Incoming call calling line identification (caller ID) not supported by modem. Error: {0}'.format(
-                    clipError))
-        else:
-            self._callingLineIdentification = True
-            try:
-                await self.write('AT+CRC=1')  # Enable extended format of incoming indication (optional)
-            except CommandError as crcError:
-                self._extendedIncomingCallIndication = False
-                self.log.warning(
-                    'Extended format incoming call indication not supported by modem. Error: {0}'.format(crcError))
+            # Attempt to identify modem type directly (if not already) - for outgoing call status updates
+            if callUpdateTableHint == 0:
+                if b'simcom' in (await self.manufacturer).lower():  # simcom modems support DTMF and don't support AT+CLAC
+                    Call.dtmfSupport = True
+                    await self.write('AT+DDET=1')  # enable detect incoming DTMF
+
+                if (await self.manufacturer).lower() == 'huawei':
+                    callUpdateTableHint = 1  # huawei
+                else:
+                    # See if this is a ZTE modem that has not yet been identified based on supported commands
+                    try:
+                        await self.write('AT+ZPAS?')
+                    except CommandError:
+                        pass  # Not a ZTE modem
+                    else:
+                        callUpdateTableHint = 3  # ZTE
+            # Load outgoing call status updates based on identified modem features
+            if callUpdateTableHint == 1:
+                # Use Hauwei's ^NOTIFICATIONs
+                self.log.info('Loading Huawei call state update table')
+                self._callStatusUpdates = ((re.compile(b'^\^ORIG:(\d),(\d)$'), self._handleCallInitiated),
+                                           (re.compile(b'^\^CONN:(\d),(\d)$'), self._handleCallAnswered),
+                                           (re.compile(b'^\^CEND:(\d),(\d),(\d)+,(\d)+$'), self._handleCallEnded))
+                self._mustPollCallStatus = False
+                # Huawei modems use ^DTMF to send DTMF tones; use that instead
+                Call.DTMF_COMMAND_BASE = '^DTMF={cid},'
+                Call.dtmfSupport = True
+            elif callUpdateTableHint == 2:
+                # Wavecom modem: +WIND notifications supported
+                self.log.info('Loading Wavecom call state update table')
+                self._callStatusUpdates = ((re.compile(b'^\+WIND: 5,(\d)$'), self._handleCallInitiated),
+                                           (re.compile(b'^OK$'), self._handleCallAnswered),
+                                           (re.compile(b'^\+WIND: 6,(\d)$'), self._handleCallEnded))
+                self._waitForAtdResponse = False  # Wavecom modems return OK only when the call is answered
+                self._mustPollCallStatus = False
+                if commands == None:  # older modem, assume it has standard DTMF support
+                    Call.dtmfSupport = True
+            elif callUpdateTableHint == 3:  # ZTE
+                # Use ZTE notifications ("CONNECT"/"HANGUP", but no "call initiated" notification)
+                self.log.info('Loading ZTE call state update table')
+                self._callStatusUpdates = ((re.compile(b'^CONNECT$'), self._handleCallAnswered),
+                                           (re.compile(b'^HANGUP:\s*(\d+)$'), self._handleCallEnded),
+                                           (re.compile(b'^OK$'), self._handleCallRejected))
+                self._waitForAtdResponse = False  # ZTE modems do not return an immediate  OK only when the call is answered
+                self._mustPollCallStatus = False
+                self._waitForCallInitUpdate = False  # ZTE modems do not provide "call initiated" updates
+                if commands == None:  # ZTE uses standard +VTS for DTMF
+                    Call.dtmfSupport = True
             else:
-                self._extendedIncomingCallIndication = True
+                # Unknown modem - we do not know what its call updates look like. Use polling instead
+                self.log.info('Unknown/generic modem type - will use polling for call state updates')
+                self._mustPollCallStatus = True
+                self._pollCallStatusRegex = re.compile(b'^\+CLCC:\s+(\d+),(\d),(\d),(\d),([^,]),"([^,]*)",(\d+)$')
+                self._waitForAtdResponse = True  # Most modems return OK immediately after issuing ATD
 
-        # Call control setup
-        await self.write('AT+CVHU=0',
-                   parseError=False)  # Enable call hang-up with ATH command (ignore if command not supported)
+            # General meta-information setup
+            await self.write('AT+COPS=3,0', parseError=False)  # Use long alphanumeric name format
 
-        self.connection_future.set_result(None)
+            # SMS setup
+            await self.write('AT+CMGF={0}'.format(1 if self._smsTextMode else 0))  # Switch to text or PDU mode for SMS messages
+            self._compileSmsRegexes()
+            if self._smscNumber != None:
+                await self.write('AT+CSCA="{0}"'.format(d(self._smscNumber)))  # Set default SMSC number
+                currentSmscNumber = self._smscNumber
+            else:
+                currentSmscNumber = await self.smsc
+            # Some modems delete the SMSC number when setting text-mode SMS parameters; preserve it if needed
+            if currentSmscNumber != None:
+                self._smscNumber = None  # clear cache
+            if self.requestDelivery:
+                await self.write('AT+CSMP=49,167,0,0', parseError=False)  # Enable delivery reports
+            else:
+                await self.write('AT+CSMP=17,167,0,0', parseError=False)  # Not enable delivery reports
+            # ...check SMSC again to ensure it did not change
+            if currentSmscNumber != None and (await self.smsc) != currentSmscNumber:
+                await self.set_smsc(currentSmscNumber)
+
+            # Set message storage, but first check what the modem supports - example response: +CPMS: (("SM","BM","SR"),("SM"))
+            try:
+                cpmsLine = lineStartingWith(b'+CPMS', await self.write('AT+CPMS=?'))
+            except CommandError:
+                # Modem does not support AT+CPMS; SMS reading unavailable
+                self._smsReadSupported = False
+                self.log.warning('SMS preferred message storage query not supported by modem. SMS reading unavailable.')
+            else:
+                cpmsSupport = cpmsLine.split(b' ', 1)[1].split(b'),(')
+                # Do a sanity check on the memory types returned - Nokia S60 devices return empty strings, for example
+                for memItem in cpmsSupport:
+                    if len(memItem) == 0:
+                        # No support for reading stored SMS via AT commands - probably a Nokia S60
+                        self._smsReadSupported = False
+                        self.log.warning(
+                            'Invalid SMS message storage support returned by modem. SMS reading unavailable. Response was: "%s"',
+                            cpmsLine)
+                        break
+                else:
+                    # Suppported memory types look fine, continue
+                    preferredMemoryTypes = (b'"SM"', b'"SM"', b'"SM"')
+                    cpmsItems = [''] * len(cpmsSupport)
+                    for i in xrange(len(cpmsSupport)):
+                        for memType in preferredMemoryTypes:
+                            if memType in cpmsSupport[i]:
+                                if i == 0:
+                                    self._smsMemReadDelete = memType
+                                cpmsItems[i] = memType.decode('ascii')
+                                break
+                    await self.write('AT+CPMS={0}'.format(','.join(cpmsItems)))  # Set message storage
+                del cpmsSupport
+                del cpmsLine
+
+            if self._smsReadSupported and (self.smsReceivedCallback or self.smsStatusReportCallback):
+                try:
+                    await self.write('AT+CNMI=' + self.AT_CNMI)  # Set message notifications
+                except CommandError:
+                    try:
+                        await self.write('AT+CNMI=2,1,0,1,0')  # Set message notifications, using TE for delivery reports <ds>
+                    except CommandError:
+                        # Message notifications not supported
+                        self._smsReadSupported = False
+                        self.log.warning('Incoming SMS notifications not supported by modem. SMS receiving unavailable.')
+
+            # Incoming call notification setup
+            try:
+                await self.write('AT+CLIP=1')  # Enable calling line identification presentation
+            except CommandError as clipError:
+                self._callingLineIdentification = False
+                self.log.warning(
+                    'Incoming call calling line identification (caller ID) not supported by modem. Error: {0}'.format(
+                        clipError))
+            else:
+                self._callingLineIdentification = True
+                try:
+                    await self.write('AT+CRC=1')  # Enable extended format of incoming indication (optional)
+                except CommandError as crcError:
+                    self._extendedIncomingCallIndication = False
+                    self.log.warning(
+                        'Extended format incoming call indication not supported by modem. Error: {0}'.format(crcError))
+                else:
+                    self._extendedIncomingCallIndication = True
+
+            # Call control setup
+            await self.write('AT+CVHU=0',
+                       parseError=False)  # Enable call hang-up with ATH command (ignore if command not supported)
+
+            self.connection_future.set_result(True)
+        except TimeoutException:
+            self.log.critical('timeout on connected_async')
+            self.connection_future.set_result(False)
 
     def process_supported_commands(self, response):
         if len(response) == 2:  # Single-line response, comma separated
@@ -446,7 +454,7 @@ class GsmModem(SerialComms):
         """
         self.pin = pin
         self.log.info('Connecting to modem on port %s at %dbps', self.port, self.baudrate)
-        await super(GsmModem, self).connect()
+        return await super(GsmModem, self).connect()
 
         # if waitingForModemToStartInSeconds > 0:
         #     while waitingForModemToStartInSeconds > 0:
