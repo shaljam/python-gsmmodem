@@ -1483,7 +1483,10 @@ class GsmModem(SerialComms):
         else:
             cmgrMatch = self.CMGR_REGEX_PDU.match(msgData[0])
             if not cmgrMatch:
+                self.log.critical('Failed to parse PDU-mode SMS message +CMGR response: {0}'.format(msgData))
                 raise CommandError('Failed to parse PDU-mode SMS message +CMGR response: {0}'.format(msgData))
+            self.log.debug('Succeeded to parse PDU-mode SMS message +CMGR response: {0}'.format(msgData))
+
             stat, alpha, length = cmgrMatch.groups()
             try:
                 stat = int(stat)
