@@ -1453,9 +1453,12 @@ class GsmModem(SerialComms):
         # Switch to the correct memory type if required
         await self._setSmsMemory(readDelete=memory)
         try:
-            msgData = await self.write('AT+CMGR={0}'.format(d(index)))
+            msgData = await self.write('AT+CMGR={0}'.format(d(index)), timeout=60)
         except CmsError as cms_error:
             self.log.critical('CmsError while reading stored SMS {}'.format(cms_error.code))
+            return
+        except TimeoutException:
+            self.log.critical('TimeoutException while reading stored SMS {}'.format(traceback.format_exc()))
             return
 
         # Parse meta information
