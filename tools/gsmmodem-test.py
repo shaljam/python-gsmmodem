@@ -29,8 +29,45 @@ async def send_ussd(ussd):
     global modem, args
 
     # await modem.connect()
-    response = await modem.sendUssd(binascii.hexlify(ussd.encode('utf-16-be')).upper(), responseTimeout=30)
-    print('ussd response: {}'.format(binascii.unhexlify(response.message).decode('utf-16-be')))
+    ussd_response = await modem.sendUssd(binascii.hexlify(ussd.encode('utf-16-be')).upper(), responseTimeout=30)
+    response = binascii.unhexlify(ussd_response.message).decode('utf-16-be')
+    print('ussd response: {}'.format(response))
+
+    while True:
+        command = input('command>>>\n')
+        if command == 'quit':
+            break
+
+        print('replying {}'.format(command))
+        ussd_response = await ussd_response.reply(binascii.hexlify(command.encode('utf-16-be')).upper())
+
+        response = binascii.unhexlify(ussd_response.message).decode('utf-16-be')
+        print('ussd response {}'.format(response))
+
+
+async def enteghale_etebar(number):
+    global modem, args
+
+    # await modem.connect()
+    ussd_response = await modem.sendUssd(binascii.hexlify('*133#'.encode('utf-16-be')).upper(), responseTimeout=30)
+    response = binascii.unhexlify(ussd_response.message).decode('utf-16-be')
+    print('ussd response: {}'.format(response))
+
+    seq = ['1', str(number), '100000', '1942', '1', 'quit']
+    index = 0
+
+    while True:
+        command = seq[index]
+        index += 1
+        if command == 'quit':
+            break
+
+        print('replying {}'.format(command))
+        ussd_response = await ussd_response.reply(binascii.hexlify(command.encode('utf-16-be')).upper())
+
+        response = binascii.unhexlify(ussd_response.message).decode('utf-16-be')
+        print('ussd response {}'.format(response))
+
 
 async def check_modem():
     global modem, args
@@ -73,6 +110,7 @@ def parseArgs():
     parser.add_argument('destination', metavar='DESTINATION', help='destination mobile number')
     parser.add_argument('-t', '--text', metavar='TEXT', help='sms text to be sent')
     parser.add_argument('-u', '--ussd', metavar='USSD', help='ussd command to be sent')
+    parser.add_argument('-e', '--enteghal', metavar='ENTEGHAL', help='number to enteghal etebar')
     return parser.parse_args()
 
 
@@ -96,6 +134,11 @@ def main():
 
     if args.ussd:
         ussd_task = asyncio.ensure_future(send_ussd(args.ussd))
+
+        loop.run_until_complete(ussd_task)
+
+    if args.enteghal:
+        ussd_task = asyncio.ensure_future(enteghale_etebar(args.enteghal))
 
         loop.run_until_complete(ussd_task)
 
